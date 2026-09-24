@@ -4,6 +4,7 @@ Biased Coin Toss Simulator
 A small Flask web app: 60% heads / 40% tails.
 Start with $25, bet any amount up to your balance, pick a side,
 and track total flips, heads, tails, and your running balance.
+Each game lasts 5 minutes, starting from the first flip.
 
 Run:
     pip install flask
@@ -14,6 +15,7 @@ Then open http://127.0.0.1:5000 in your browser.
 import random
 import re
 import secrets
+import time
 from decimal import Decimal, InvalidOperation
 
 from flask import Flask, redirect, render_template_string, request, session, url_for
@@ -23,8 +25,7 @@ app.secret_key = secrets.token_hex(16)
 
 STARTING_BALANCE = "25.00"
 HEADS_PROBABILITY = 0.60
-FLIPS_PER_SECOND = 1
-SIMULATED_MINUTES = 5
+TIME_LIMIT_SECONDS = 5 * 60
 CENT = Decimal("0.01")
 BET_PATTERN = re.compile(r"-?(\d+\.?\d*|\.\d+)", re.ASCII)
 
@@ -46,8 +47,9 @@ PAGE = """
   .stat { background:#f7f7f7; border-radius:8px; padding:12px; text-align:center; }
   .stat .label { font-size:.8rem; color:#666; text-transform:uppercase; letter-spacing:.05em; }
   .stat .value { font-size:1.5rem; font-weight:700; margin-top:4px; }
-  .balance { grid-column:1 / -1; background:#1f3a2e; color:#fff; }
-  .balance .label { color:#b8d4c4; }
+  .balance, .timer { background:#1f3a2e; color:#fff; }
+  .balance .label, .timer .label, .timer .hint { color:#b8d4c4; }
+  .timer .hint { font-size:.75rem; margin-top:2px; }
   .result { padding:12px; border-radius:8px; margin-bottom:16px; text-align:center; font-weight:600; }
   .win { background:#e3f4e8; color:#1d6b35; }
   .lose { background:#fbe6e4; color:#9b2c20; }
@@ -60,8 +62,6 @@ PAGE = """
            border-radius:6px; cursor:pointer; margin-top:16px; }
   .flip { background:#c9a227; color:#222; }
   .flip:disabled { background:#ddd; color:#888; cursor:not-allowed; }
-  .simulate { background:#1f3a2e; color:#fff; }
-  .simulate:disabled { background:#ddd; color:#888; cursor:not-allowed; }
   .reset { background:transparent; color:#666; text-decoration:underline; margin-top:8px; }
 </style>
 </head>
@@ -72,20 +72,26 @@ PAGE = """
 
   <div class="stats">
     <div class="stat balance"><div class="label">Balance</div><div class="value">${{ balance }}</div></div>
+    <div class="stat timer"><div class="label">Time left</div>
+      <div class="value" id="timer" data-left="{{ seconds_left }}" data-running="{{ 'yes' if running else 'no' }}">{{ time_left }}</div>
+      {% if not running and not time_up %}<div class="hint">Starts on first flip</div>{% endif %}
+    </div>
     <div class="stat"><div class="label">Total flips</div><div class="value">{{ flips }}</div></div>
     <div class="stat"><div class="label">Heads</div><div class="value">{{ heads }}</div></div>
     <div class="stat"><div class="label">Tails</div><div class="value">{{ tails }}</div></div>
     <div class="stat"><div class="label">Heads %</div><div class="value">{{ heads_pct }}</div></div>
   </div>
 
-  {% if message %}
+  {% if time_up %}
+    <div class="result error">Time's up! You finished with ${{ balance }} after {{ flips }} flips.</div>
+  {% elif message %}
     <div class="result {{ message_class }}">{{ message }}</div>
   {% endif %}
 
-  <form id="play" method="post" action="{{ url_for('flip') }}">
+  <form method="post" action="{{ url_for('flip') }}">
     <label for="bet">Bet amount ($)</label>
     <input id="bet" name="bet" type="number" step="0.01" min="0.01" max="{{ balance }}"
-           value="{{ last_bet }}" required {% if broke %}disabled{% endif %}>
+           value="{{ last_bet }}" required {% if locked %}disabled{% endif %}>
 
     <label>Your call</label>
     <div class="sides">
@@ -93,20 +99,29 @@ PAGE = """
       <label><input type="radio" name="side" value="tails" {% if last_side == 'tails' %}checked{% endif %}> Tails</label>
     </div>
 
-    <button class="flip" type="submit" {% if broke %}disabled{% endif %}>
-      {% if broke %}Out of money{% else %}Flip!{% endif %}
+    <button class="flip" type="submit" {% if locked %}disabled{% endif %}>
+      {% if time_up %}Time's up{% elif broke %}Out of money{% else %}Flip!{% endif %}
     </button>
   </form>
 
   <form method="post" action="{{ url_for('reset') }}">
     <button class="reset" type="submit">Reset to $25</button>
   </form>
-
-  <button class="simulate" type="submit" form="play" formaction="{{ url_for('simulate') }}"
-          {% if broke %}disabled{% endif %}>
-    Simulate {{ sim_minutes }} minute{{ "" if sim_minutes == 1 else "s" }} ({{ sim_flips }} flips)
-  </button>
 </div>
+<script>
+  // Count down in the browser; the server enforces the limit either way.
+  const timer = document.getElementById("timer");
+  if (timer.dataset.running === "yes") {
+    const end = Date.now() + Number(timer.dataset.left) * 1000;
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
+      timer.textContent = Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0");
+      if (left === 0) location.reload();
+      else setTimeout(tick, 250);
+    };
+    tick();
+  }
+</script>
 </body>
 </html>
 """
@@ -121,12 +136,22 @@ def init_state():
     session.setdefault("last_side", "heads")
 
 
+def seconds_left():
+    """Seconds remaining in this game. The clock starts on the first flip."""
+    started = session.get("started_at")
+    if started is None:
+        return TIME_LIMIT_SECONDS
+    return max(0, TIME_LIMIT_SECONDS - int(time.time() - started))
+
+
 @app.route("/")
 def index():
     init_state()
     balance = Decimal(session["balance"])
     flips = session["flips"]
     heads_pct = f"{session['heads'] / flips * 100:.1f}%" if flips else "—"
+    left = seconds_left()
+    time_up = left == 0
     return render_template_string(
         PAGE,
         balance=f"{balance:.2f}",
@@ -137,8 +162,11 @@ def index():
         last_bet=session["last_bet"],
         last_side=session["last_side"],
         broke=balance <= 0,
-        sim_minutes=SIMULATED_MINUTES,
-        sim_flips=SIMULATED_MINUTES * 60 * FLIPS_PER_SECOND,
+        time_up=time_up,
+        locked=balance <= 0 or time_up,
+        seconds_left=left,
+        time_left=f"{left // 60}:{left % 60:02d}",
+        running="started_at" in session and not time_up,
         message=session.pop("message", None),
         message_class=session.pop("message_class", ""),
     )
@@ -171,23 +199,22 @@ def read_bet(balance):
     return side, bet.quantize(CENT), None
 
 
-def toss():
-    result = "heads" if random.random() < HEADS_PROBABILITY else "tails"
-    session["flips"] += 1
-    session[result] += 1
-    return result
-
-
 @app.route("/flip", methods=["POST"])
 def flip():
     init_state()
+    if seconds_left() == 0:
+        return redirect(url_for("index"))  # the page shows the time's-up summary
+
     balance = Decimal(session["balance"])
     side, bet, error = read_bet(balance)
     if error:
         session["message"], session["message_class"] = error, "error"
         return redirect(url_for("index"))
 
-    result = toss()
+    session.setdefault("started_at", time.time())
+    result = "heads" if random.random() < HEADS_PROBABILITY else "tails"
+    session["flips"] += 1
+    session[result] += 1
 
     if result == side:
         balance += bet
@@ -198,37 +225,6 @@ def flip():
         session["message"] = f"{result.title()}. You lost ${bet:.2f}."
         session["message_class"] = "lose"
 
-    session["balance"] = str(balance)
-    session["last_bet"] = str(min(bet, balance)) if balance > 0 else "0"
-    session["last_side"] = side
-    return redirect(url_for("index"))
-
-
-@app.route("/simulate", methods=["POST"])
-def simulate():
-    """Flip repeatedly for SIMULATED_MINUTES at FLIPS_PER_SECOND with the same bet and side.
-    If the balance drops below the bet, bet whatever is left; stop when broke."""
-    init_state()
-    start = balance = Decimal(session["balance"])
-    side, bet, error = read_bet(balance)
-    if error:
-        session["message"], session["message_class"] = error, "error"
-        return redirect(url_for("index"))
-
-    total = SIMULATED_MINUTES * 60 * FLIPS_PER_SECOND
-    done = 0
-    while done < total and balance > 0:
-        stake = min(bet, balance)
-        balance += stake if toss() == side else -stake
-        done += 1
-
-    change = balance - start
-    summary = f"Simulated {done} flips betting ${bet:.2f} on {side}: "
-    summary += f"{'up' if change >= 0 else 'down'} ${abs(change):.2f}."
-    if done < total:
-        summary += " Went broke early."
-    session["message"] = summary
-    session["message_class"] = "win" if change >= 0 else "lose"
     session["balance"] = str(balance)
     session["last_bet"] = str(min(bet, balance)) if balance > 0 else "0"
     session["last_side"] = side

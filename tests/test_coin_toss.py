@@ -73,55 +73,46 @@ class CoinTossTestCase(unittest.TestCase):
         self.assertEqual(state["message_class"], "error")
         self.assertEqual(state["balance"], "25.00")
         self.assertEqual(state["flips"], 0)
+        self.assertNotIn("started_at", state)  # rejected bets don't start the clock
 
 
 class InvalidInputTests(CoinTossTestCase):
-    def test_invalid_bets_are_rejected_on_flip(self):
+    def test_invalid_bets_are_rejected(self):
         for bet, message in INVALID_BETS:
             with self.subTest(bet=bet):
                 self.setUp()
                 self.assert_rejected(self.post("/flip", bet, "heads"), message)
 
-    def test_invalid_bets_are_rejected_on_simulate(self):
-        for bet, message in INVALID_BETS:
-            with self.subTest(bet=bet):
-                self.setUp()
-                self.assert_rejected(self.post("/simulate", bet, "heads"), message)
-
     def test_missing_bet_field(self):
-        for route in ("/flip", "/simulate"):
-            with self.subTest(route=route):
-                self.setUp()
-                self.assert_rejected(self.post(route, side="heads"), "Enter a bet amount.")
+        self.assert_rejected(self.post("/flip", side="heads"), "Enter a bet amount.")
 
     def test_invalid_sides_are_rejected(self):
-        for route in ("/flip", "/simulate"):
-            for side in INVALID_SIDES:
-                with self.subTest(route=route, side=side):
-                    self.setUp()
-                    self.assert_rejected(self.post(route, "1.00", side), "Pick heads or tails.")
+        for side in INVALID_SIDES:
+            with self.subTest(side=side):
+                self.setUp()
+                self.assert_rejected(self.post("/flip", "1.00", side), "Pick heads or tails.")
 
     def test_rejected_input_never_causes_server_error(self):
         weird = ["\x00", "1" * 10000, "0x10", "1..2", "--1", "+1", "1.2.3", "🪙"]
-        for route in ("/flip", "/simulate"):
-            for bet in weird:
-                with self.subTest(route=route, bet=bet[:20]):
-                    self.setUp()
-                    response = self.post(route, bet, "heads")
-                    self.assertEqual(response.status_code, 302)
-                    self.assertEqual(self.state()["flips"], 0)
+        for bet in weird:
+            with self.subTest(bet=bet[:20]):
+                self.setUp()
+                response = self.post("/flip", bet, "heads")
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(self.state()["flips"], 0)
 
     def test_broke_player_cannot_bet(self):
         self.set_balance("0")
-        for route in ("/flip", "/simulate"):
-            with self.subTest(route=route):
-                self.post(route, "0.01", "heads")
-                state = self.state()
-                self.assertEqual(state["message"], "You only have $0.00 to bet.")
-                self.assertEqual(state["flips"], 0)
+        self.post("/flip", "0.01", "heads")
+        state = self.state()
+        self.assertEqual(state["message"], "You only have $0.00 to bet.")
+        self.assertEqual(state["flips"], 0)
+
+    def test_removed_simulate_route_is_gone(self):
+        self.assertEqual(self.post("/simulate", "1", "heads").status_code, 404)
 
     def test_get_on_post_only_routes_is_not_allowed(self):
-        for route in ("/flip", "/simulate", "/reset"):
+        for route in ("/flip", "/reset"):
             with self.subTest(route=route):
                 self.assertEqual(self.client.get(route).status_code, 405)
 
@@ -181,36 +172,92 @@ class ValidInputTests(CoinTossTestCase):
         self.assertEqual((state["balance"], state["flips"]), ("25.00", 0))
 
 
-class SimulateTests(CoinTossTestCase):
-    def simulate(self, bet, side, outcome):
-        with mock.patch("coin_toss.random.random", return_value=outcome):
-            return self.post("/simulate", bet, side)
+class TimeLimitTests(CoinTossTestCase):
+    START = 1_000_000.0
 
-    def test_runs_full_simulation(self):
-        self.simulate("1", "heads", HEADS)
-        state = self.state()
-        self.assertEqual(state["flips"], 300)
-        self.assertEqual(Decimal(state["balance"]), Decimal("325.00"))
-        self.assertIn("Simulated 300 flips", state["message"])
+    # Replace the `time` module only inside coin_toss. Patching time.time itself would
+    # also move Flask's clock, and it rejects session cookies signed in the past/future.
+    def clock(self, now):
+        return mock.patch("coin_toss.time", mock.Mock(time=mock.Mock(return_value=now)))
 
-    def test_stops_when_broke(self):
-        self.simulate("1", "heads", TAILS)
-        state = self.state()
-        self.assertEqual(state["flips"], 25)
-        self.assertEqual(Decimal(state["balance"]), 0)
-        self.assertIn("Went broke early", state["message"])
+    def flip_at(self, now, bet="1", side="heads", outcome=HEADS):
+        with self.clock(now), mock.patch("coin_toss.random.random", return_value=outcome):
+            return self.post("/flip", bet, side)
 
-    def test_bets_remaining_balance_when_short(self):
-        self.simulate("10", "heads", TAILS)  # 25 -> 15 -> 5 -> 0 (last bet is only 5)
-        state = self.state()
-        self.assertEqual(state["flips"], 3)
-        self.assertEqual(Decimal(state["balance"]), 0)
+    def page_at(self, now):
+        with self.clock(now):
+            return self.client.get("/").get_data(as_text=True)
 
-    def test_random_run_keeps_counts_consistent(self):
-        self.post("/simulate", "0.50", "heads")
-        state = self.state()
-        self.assertEqual(state["heads"] + state["tails"], state["flips"])
-        self.assertGreaterEqual(Decimal(state["balance"]), 0)
+    def test_clock_waits_for_first_flip(self):
+        page = self.page_at(self.START)
+        self.assertIn(">5:00<", page)
+        self.assertIn("Starts on first flip", page)
+        self.assertIn('data-running="no"', page)
+        self.assertNotIn("started_at", self.state())
+
+    def test_first_flip_starts_clock(self):
+        self.flip_at(self.START)
+        self.assertEqual(self.state()["started_at"], self.START)
+        page = self.page_at(self.START)
+        self.assertIn('data-running="yes"', page)
+        self.assertNotIn("Starts on first flip", page)
+
+    def test_later_flips_do_not_restart_clock(self):
+        self.flip_at(self.START)
+        self.flip_at(self.START + 100)
+        self.assertEqual(self.state()["started_at"], self.START)
+
+    def test_countdown_shows_time_remaining(self):
+        self.flip_at(self.START)
+        for elapsed, shown in [(0, "5:00"), (61, "3:59"), (299, "0:01")]:
+            with self.subTest(elapsed=elapsed):
+                page = self.page_at(self.START + elapsed)
+                self.assertIn(f'data-left="{300 - elapsed}"', page)
+                self.assertIn(f">{shown}<", page)
+
+    def test_can_flip_just_before_limit(self):
+        self.flip_at(self.START)
+        self.flip_at(self.START + 299.9)
+        self.assertEqual(self.state()["flips"], 2)
+
+    def test_cannot_flip_after_limit(self):
+        self.flip_at(self.START)
+        for elapsed in (300, 301, 10_000):
+            with self.subTest(elapsed=elapsed):
+                self.flip_at(self.START + elapsed)
+                state = self.state()
+                self.assertEqual(state["flips"], 1)
+                self.assertEqual(Decimal(state["balance"]), Decimal("26.00"))
+
+    def test_time_up_is_checked_before_bet(self):
+        self.flip_at(self.START)
+        self.client.get("/")  # clear the flip's message
+        self.flip_at(self.START + 300, bet="abc")
+        self.assertNotIn("message", self.state())
+
+    def test_page_after_time_up(self):
+        self.flip_at(self.START)
+        self.flip_at(self.START + 10, outcome=TAILS)
+        page = self.page_at(self.START + 300)
+        self.assertIn("Time's up! You finished with $25.00 after 2 flips.", page)
+        self.assertIn(">0:00<", page)
+        self.assertIn('data-running="no"', page)
+        self.assertEqual(page.count("disabled>"), 2)  # bet input and Flip!
+        self.assertRegex(page, r"disabled>\s*Time's up\s*</button>")
+
+    def test_reset_restarts_clock(self):
+        self.flip_at(self.START)
+        self.client.post("/reset")
+        self.assertIn(">5:00<", self.page_at(self.START + 1000))
+        self.flip_at(self.START + 1000)
+        self.assertEqual(self.state()["flips"], 1)
+
+    def test_limit_follows_setting(self):
+        with mock.patch.object(coin_toss, "TIME_LIMIT_SECONDS", 90):
+            self.assertIn(">1:30<", self.page_at(self.START))
+            self.flip_at(self.START)
+            self.flip_at(self.START + 90)
+            self.assertEqual(self.state()["flips"], 1)
 
 
 class PageTests(CoinTossTestCase):
@@ -229,14 +276,10 @@ class PageTests(CoinTossTestCase):
         self.set_balance("0")
         page = self.page()
         self.assertIn("Out of money", page)
-        self.assertEqual(page.count("disabled>"), 3)  # bet input, Flip!, simulate
+        self.assertEqual(page.count("disabled>"), 2)  # bet input and Flip!
 
-    def test_simulate_label_follows_setting(self):
-        for minutes, label in [(1, "Simulate 1 minute (60 flips)"),
-                               (5, "Simulate 5 minutes (300 flips)")]:
-            with self.subTest(minutes=minutes), \
-                    mock.patch.object(coin_toss, "SIMULATED_MINUTES", minutes):
-                self.assertIn(label, self.page())
+    def test_no_simulate_button(self):
+        self.assertNotIn("Simulate", self.page())
 
     def test_heads_percentage(self):
         with self.client.session_transaction() as sess:
