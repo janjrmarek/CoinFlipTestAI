@@ -101,7 +101,7 @@ PAGE = """
 
   <button class="simulate" type="submit" form="play" formaction="{{ url_for('simulate') }}"
           {% if broke %}disabled{% endif %}>
-    Simulate 5 minutes ({{ sim_flips }} flips)
+    Simulate {{ sim_minutes }} minute{{ "" if sim_minutes == 1 else "s" }} ({{ sim_flips }} flips)
   </button>
 </div>
 </body>
@@ -134,6 +134,7 @@ def index():
         last_bet=session["last_bet"],
         last_side=session["last_side"],
         broke=balance <= 0,
+        sim_minutes=SIMULATED_MINUTES,
         sim_flips=SIMULATED_MINUTES * 60 * FLIPS_PER_SECOND,
         message=session.pop("message", None),
         message_class=session.pop("message_class", ""),
