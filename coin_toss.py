@@ -12,6 +12,7 @@ Then open http://127.0.0.1:5000 in your browser.
 """
 
 import random
+import re
 import secrets
 from decimal import Decimal, InvalidOperation
 
@@ -24,6 +25,8 @@ STARTING_BALANCE = "25.00"
 HEADS_PROBABILITY = 0.60
 FLIPS_PER_SECOND = 1
 SIMULATED_MINUTES = 5
+CENT = Decimal("0.01")
+BET_PATTERN = re.compile(r"-?(\d+\.?\d*|\.\d+)", re.ASCII)
 
 PAGE = """
 <!doctype html>
@@ -86,7 +89,7 @@ PAGE = """
 
     <label>Your call</label>
     <div class="sides">
-      <label><input type="radio" name="side" value="heads" {% if last_side == 'heads' %}checked{% endif %}> Heads</label>
+      <label><input type="radio" name="side" value="heads" required {% if last_side == 'heads' %}checked{% endif %}> Heads</label>
       <label><input type="radio" name="side" value="tails" {% if last_side == 'tails' %}checked{% endif %}> Tails</label>
     </div>
 
@@ -143,20 +146,29 @@ def index():
 
 def read_bet(balance):
     """Parse side and bet from the form. Returns (side, bet, error_message)."""
-    side = request.form.get("side", "heads")
+    side = request.form.get("side", "")
     if side not in ("heads", "tails"):
-        side = "heads"
+        return side, None, "Pick heads or tails."
 
+    # Plain decimal numbers only: rejects NaN, Infinity, exponents, commas,
+    # underscores and non-ASCII digits, all of which Decimal() would accept or choke on.
+    raw = request.form.get("bet", "").strip()
+    if not raw:
+        return side, None, "Enter a bet amount."
+    if not BET_PATTERN.fullmatch(raw):
+        return side, None, "Enter the bet as a number, like 1.50."
     try:
-        bet = Decimal(request.form.get("bet", "0")).quantize(Decimal("0.01"))
+        bet = Decimal(raw)
     except InvalidOperation:
-        bet = Decimal("0")
+        return side, None, "Enter the bet as a number, like 1.50."
 
     if bet <= 0:
-        return side, bet, "Enter a bet greater than $0."
+        return side, None, "Enter a bet greater than $0."
     if bet > balance:
-        return side, bet, f"You only have ${balance:.2f} to bet."
-    return side, bet, None
+        return side, None, f"You only have ${balance:.2f} to bet."
+    if bet != bet.quantize(CENT):
+        return side, None, "Bets must be in whole cents."
+    return side, bet.quantize(CENT), None
 
 
 def toss():

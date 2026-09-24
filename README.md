@@ -14,8 +14,12 @@ simulate a few minutes of play at once to see how a strategy works out over many
   (one flip per second) using the bet and side currently selected. If your balance
   drops below the bet, it bets whatever is left, and it stops early if you go broke.
   A summary shows how many flips ran and how much you're up or down.
-- **Input checks.** Bets of $0 or less, or more than your balance, are rejected with a
-  message. When the balance hits $0, betting is disabled.
+- **Input checks.** The browser blocks bad input first (bet must be $0.01 up to your
+  balance, in whole cents, and a side must be picked). The server checks again and
+  rejects, with a message, anything that isn't a plain number (e.g. `abc`, `NaN`,
+  `1e3`, `1,000`), bets of $0 or less, bets with fractions of a cent, bets over your
+  balance, and sides other than heads or tails. When the balance hits $0, betting is
+  disabled.
 - **Reset.** **Reset to $25** clears all stats and starts over.
 
 ## Scope
@@ -37,6 +41,17 @@ python coin_toss.py
 ```
 
 Then open http://127.0.0.1:5000 in your browser.
+
+## Testing
+
+Tests use Python's built-in `unittest`, so nothing extra is needed. From the repo root:
+
+```bash
+python -m unittest discover -s tests
+```
+
+They cover invalid bets and sides on both flip and simulate, winning and losing flips,
+going broke, the simulation, reset, and the page's validation attributes.
 
 ## Configuration
 
