@@ -9,7 +9,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import coin_toss  # noqa: E402
 
-HEADS = 0.0  # random.random() values that force each outcome
+HEADS = 0.0  # random.random() values that force each outcome at the default 60% odds
 TAILS = 0.99
 
 INVALID_BETS = [
@@ -43,6 +43,28 @@ INVALID_BETS = [
 
 INVALID_SIDES = [None, "", "edge", "HEADS", "Tails", "heads "]
 
+INVALID_TIME_LIMITS = [
+    ("", "Enter a time limit."),
+    ("   ", "Enter a time limit."),
+    ("abc", "Enter the time limit as a whole number of minutes."),
+    ("5.5", "Enter the time limit as a whole number of minutes."),
+    ("-5", "Enter the time limit as a whole number of minutes."),
+    ("1e1", "Enter the time limit as a whole number of minutes."),
+    ("0", "Time limit must be between 1 and 60 minutes."),
+    ("61", "Time limit must be between 1 and 60 minutes."),
+    ("100", "Time limit must be between 1 and 60 minutes."),
+]
+
+INVALID_HEADS_PCTS = [
+    ("", "Enter the heads probability."),
+    ("abc", "Enter the heads probability as a whole number percentage."),
+    ("50.5", "Enter the heads probability as a whole number percentage."),
+    ("-1", "Enter the heads probability as a whole number percentage."),
+    ("0", "Heads probability must be between 1 and 99."),
+    ("100", "Heads probability must be between 1 and 99."),
+    ("101", "Heads probability must be between 1 and 99."),
+]
+
 
 class CoinTossTestCase(unittest.TestCase):
     def setUp(self):
@@ -50,8 +72,13 @@ class CoinTossTestCase(unittest.TestCase):
         self.client = coin_toss.app.test_client()
         self.client.get("/")  # initialise the session
 
-    def post(self, route, bet=None, side=None):
-        data = {}
+    def post(self, route, bet=None, side=None, time_limit=None, heads_pct=None):
+        # time_limit/heads_pct default to valid values so tests that aren't about
+        # settings don't need to supply them (they're only read on the first flip).
+        data = {
+            "time_limit": str(coin_toss.DEFAULT_TIME_LIMIT_MINUTES) if time_limit is None else time_limit,
+            "heads_pct": str(coin_toss.DEFAULT_HEADS_PCT) if heads_pct is None else heads_pct,
+        }
         if bet is not None:
             data["bet"] = bet
         if side is not None:
@@ -73,7 +100,9 @@ class CoinTossTestCase(unittest.TestCase):
         self.assertEqual(state["message_class"], "error")
         self.assertEqual(state["balance"], "25.00")
         self.assertEqual(state["flips"], 0)
-        self.assertNotIn("started_at", state)  # rejected bets don't start the clock
+        self.assertNotIn("started_at", state)  # a rejected first flip doesn't start the game
+        self.assertNotIn("time_limit_minutes", state)
+        self.assertNotIn("heads_pct", state)
 
 
 class InvalidInputTests(CoinTossTestCase):
@@ -172,6 +201,77 @@ class ValidInputTests(CoinTossTestCase):
         self.assertEqual((state["balance"], state["flips"]), ("25.00", 0))
 
 
+class GameSettingsTests(CoinTossTestCase):
+    """Time limit and heads odds must be set on the first flip and then lock in."""
+
+    def test_invalid_time_limits_are_rejected(self):
+        for value, message in INVALID_TIME_LIMITS:
+            with self.subTest(value=value):
+                self.setUp()
+                self.assert_rejected(self.post("/flip", "1", "heads", time_limit=value), message)
+
+    def test_invalid_heads_pcts_are_rejected(self):
+        for value, message in INVALID_HEADS_PCTS:
+            with self.subTest(value=value):
+                self.setUp()
+                self.assert_rejected(self.post("/flip", "1", "heads", heads_pct=value), message)
+
+    def test_settings_are_checked_before_the_bet(self):
+        # An invalid setting is reported even if the bet is also invalid.
+        self.assert_rejected(
+            self.post("/flip", "not-a-number", "heads", time_limit="0"),
+            "Time limit must be between 1 and 60 minutes.",
+        )
+
+    def test_valid_settings_are_locked_in_on_first_flip(self):
+        self.post("/flip", "1", "heads", time_limit="10", heads_pct="75")
+        state = self.state()
+        self.assertEqual(state["time_limit_minutes"], 10)
+        self.assertEqual(state["heads_pct"], 75)
+        self.assertIn("started_at", state)
+
+    def test_settings_are_ignored_on_later_flips(self):
+        self.post("/flip", "1", "heads", time_limit="10", heads_pct="75")
+        self.post("/flip", "1", "heads", time_limit="1", heads_pct="1")
+        state = self.state()
+        self.assertEqual(state["time_limit_minutes"], 10)
+        self.assertEqual(state["heads_pct"], 75)
+
+    def test_configured_odds_affect_the_coin(self):
+        # heads_pct=90: random.random() of 0.85 (85%) is heads, 0.95 (95%) is tails.
+        with mock.patch("coin_toss.random.random", side_effect=[0.85, 0.95]):
+            self.post("/flip", "1", "heads", heads_pct="90")
+            self.post("/flip", "1", "heads")
+        state = self.state()
+        self.assertEqual((state["heads"], state["tails"]), (1, 1))
+
+    def test_rejected_settings_are_remembered_for_redisplay(self):
+        self.post("/flip", "1", "heads", time_limit="abc", heads_pct="75")
+        page = self.client.get("/").get_data(as_text=True)  # the flip's own redirect
+        self.assertIn('value="abc"', page)
+        self.assertIn('value="75"', page)
+
+    def test_settings_form_shown_before_first_flip(self):
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn('name="time_limit"', page)
+        self.assertIn('name="heads_pct"', page)
+        self.assertIn(f'value="{coin_toss.DEFAULT_TIME_LIMIT_MINUTES}"', page)
+        self.assertIn(f'value="{coin_toss.DEFAULT_HEADS_PCT}"', page)
+
+    def test_settings_locked_display_after_first_flip(self):
+        self.post("/flip", "1", "heads", time_limit="10", heads_pct="75")
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertNotIn('name="time_limit"', page)
+        self.assertNotIn('name="heads_pct"', page)
+        self.assertIn("Time limit: 10 min", page)
+        self.assertIn("Heads odds: 75% / Tails 25%", page)
+
+    def test_odds_line_follows_configured_probability(self):
+        self.post("/flip", "1", "heads", heads_pct="35")
+        page = self.client.get("/").get_data(as_text=True)
+        self.assertIn("Heads 35% &middot; Tails 65%", page)
+
+
 class TimeLimitTests(CoinTossTestCase):
     START = 1_000_000.0
 
@@ -180,9 +280,9 @@ class TimeLimitTests(CoinTossTestCase):
     def clock(self, now):
         return mock.patch("coin_toss.time", mock.Mock(time=mock.Mock(return_value=now)))
 
-    def flip_at(self, now, bet="1", side="heads", outcome=HEADS):
+    def flip_at(self, now, bet="1", side="heads", outcome=HEADS, time_limit=None, heads_pct=None):
         with self.clock(now), mock.patch("coin_toss.random.random", return_value=outcome):
-            return self.post("/flip", bet, side)
+            return self.post("/flip", bet, side, time_limit=time_limit, heads_pct=heads_pct)
 
     def page_at(self, now):
         with self.clock(now):
@@ -217,7 +317,7 @@ class TimeLimitTests(CoinTossTestCase):
                 self.assertIn(f">{shown}<", page)
                 self.assertIn('id="time-up" hidden', page)
 
-    def test_refresh_restarts_clock(self):
+    def test_refresh_resets_the_clock(self):
         self.flip_at(self.START)
         self.assertIn(">4:50<", self.page_at(self.START + 10))  # redirect after the flip
         page = self.page_at(self.START + 20)                    # user refreshes
@@ -225,28 +325,33 @@ class TimeLimitTests(CoinTossTestCase):
         self.assertIn("Starts on first flip", page)
         self.assertNotIn("started_at", self.state())
 
-    def test_refresh_keeps_balance_and_stats(self):
+    def test_refresh_resets_balance_and_stats_too(self):
         self.flip_at(self.START)
-        self.page_at(self.START)
-        self.page_at(self.START + 20)
+        self.page_at(self.START)       # the flip's own redirect: state kept
+        self.page_at(self.START + 20)  # a real refresh: everything resets
         state = self.state()
-        self.assertEqual((Decimal(state["balance"]), state["flips"]), (Decimal("26.00"), 1))
+        self.assertEqual(state["balance"], "25.00")
+        self.assertEqual((state["flips"], state["heads"], state["tails"]), (0, 0, 0))
+        self.assertNotIn("time_limit_minutes", state)
+        self.assertNotIn("heads_pct", state)
 
-    def test_next_flip_after_refresh_starts_new_clock(self):
+    def test_next_flip_after_refresh_is_a_new_game(self):
         self.flip_at(self.START)
         self.page_at(self.START)
         self.page_at(self.START + 200)  # refresh
         self.flip_at(self.START + 250)
-        self.assertEqual(self.state()["started_at"], self.START + 250)
+        state = self.state()
+        self.assertEqual(state["started_at"], self.START + 250)
+        self.assertEqual(state["flips"], 1)
         self.assertIn(">4:00<", self.page_at(self.START + 310))
 
-    def test_refresh_after_time_up_gives_fresh_clock(self):
+    def test_refresh_after_time_up_starts_a_fresh_game(self):
         self.flip_at(self.START)
-        self.flip_at(self.START + 300)  # too late
+        self.flip_at(self.START + 300)  # too late, ignored
         self.assertIn('data-running="no"', self.page_at(self.START + 300))
         self.assertIn(">5:00<", self.page_at(self.START + 301))  # refresh
         self.flip_at(self.START + 302)
-        self.assertEqual(self.state()["flips"], 2)
+        self.assertEqual(self.state()["flips"], 1)  # the first flip of the new game
 
     def test_rejected_bet_does_not_restart_clock(self):
         self.flip_at(self.START)
@@ -294,12 +399,12 @@ class TimeLimitTests(CoinTossTestCase):
         self.flip_at(self.START + 100)
         self.assertEqual(self.state()["flips"], 1)
 
-    def test_limit_follows_setting(self):
-        with mock.patch.object(coin_toss, "TIME_LIMIT_SECONDS", 90):
-            self.assertIn(">1:30<", self.page_at(self.START))
-            self.flip_at(self.START)
-            self.flip_at(self.START + 90)
-            self.assertEqual(self.state()["flips"], 1)
+    def test_limit_follows_configured_minutes(self):
+        self.flip_at(self.START, time_limit="1")
+        self.assertEqual(self.state()["time_limit_minutes"], 1)
+        self.assertIn(">0:50<", self.page_at(self.START + 10))
+        self.flip_at(self.START + 60)  # time's up at 60s for a 1-minute game
+        self.assertEqual(self.state()["flips"], 1)
 
 
 class PageTests(CoinTossTestCase):
@@ -315,7 +420,8 @@ class PageTests(CoinTossTestCase):
         self.assertIn('value="heads" required', self.page())
 
     def test_controls_disabled_when_broke(self):
-        self.set_balance("0")
+        with mock.patch("coin_toss.random.random", return_value=TAILS):
+            self.post("/flip", "25.00", "heads")  # bet it all and lose
         page = self.page()
         self.assertIn("Out of money", page)
         self.assertEqual(page.count("disabled>"), 2)  # bet input and Flip!
@@ -323,9 +429,14 @@ class PageTests(CoinTossTestCase):
     def test_no_simulate_button(self):
         self.assertNotIn("Simulate", self.page())
 
+    def test_default_odds_shown_before_first_flip(self):
+        self.assertIn("Heads 60% &middot; Tails 40%", self.page())
+
     def test_heads_percentage(self):
-        with self.client.session_transaction() as sess:
-            sess.update(flips=3, heads=2, tails=1)
+        with mock.patch("coin_toss.random.random", side_effect=[HEADS, HEADS, TAILS]):
+            self.post("/flip", "1", "heads")
+            self.post("/flip", "1", "heads")
+            self.post("/flip", "1", "heads")
         self.assertIn("66.7%", self.page())
 
     def test_message_shown_once(self):

@@ -1,10 +1,10 @@
 """
 Biased Coin Toss Simulator
 --------------------------
-A small Flask web app: 60% heads / 40% tails.
-Start with $25, bet any amount up to your balance, pick a side,
-and track total flips, heads, tails, and your running balance.
-You get 5 minutes, starting from the first flip; refreshing the page restarts the clock.
+A small Flask web app. Before your first flip, choose a time limit and the odds of
+heads; those lock in once you flip. Start with $25, bet any amount up to your
+balance, pick a side, and track total flips, heads, tails, and your running balance.
+Refreshing the page starts a brand new game.
 
 Run:
     pip install flask
@@ -24,10 +24,17 @@ app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
 STARTING_BALANCE = "25.00"
-HEADS_PROBABILITY = 0.60
-TIME_LIMIT_SECONDS = 5 * 60
 CENT = Decimal("0.01")
 BET_PATTERN = re.compile(r"-?(\d+\.?\d*|\.\d+)", re.ASCII)
+WHOLE_NUMBER_PATTERN = re.compile(r"\d+", re.ASCII)
+
+DEFAULT_TIME_LIMIT_MINUTES = 5
+MIN_TIME_LIMIT_MINUTES = 1
+MAX_TIME_LIMIT_MINUTES = 60
+
+DEFAULT_HEADS_PCT = 60
+MIN_HEADS_PCT = 1
+MAX_HEADS_PCT = 99
 
 PAGE = """
 <!doctype html>
@@ -63,12 +70,13 @@ PAGE = """
   .flip { background:#c9a227; color:#222; }
   .flip:disabled { background:#ddd; color:#888; cursor:not-allowed; }
   .reset { background:transparent; color:#666; text-decoration:underline; margin-top:8px; }
+  .settings-locked { color:#666; font-size:.85rem; margin:10px 0 0; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>🪙 Coin Toss</h1>
-  <p class="odds">Heads 60% &middot; Tails 40% &middot; Even-money payout</p>
+  <p class="odds">Heads {{ heads_pct }}% &middot; Tails {{ tails_pct }}% &middot; Even-money payout</p>
 
   <div class="stats">
     <div class="stat balance"><div class="label">Balance</div><div class="value">${{ balance }}</div></div>
@@ -79,7 +87,7 @@ PAGE = """
     <div class="stat"><div class="label">Total flips</div><div class="value">{{ flips }}</div></div>
     <div class="stat"><div class="label">Heads</div><div class="value">{{ heads }}</div></div>
     <div class="stat"><div class="label">Tails</div><div class="value">{{ tails }}</div></div>
-    <div class="stat"><div class="label">Heads %</div><div class="value">{{ heads_pct }}</div></div>
+    <div class="stat"><div class="label">Heads %</div><div class="value">{{ heads_pct_stat }}</div></div>
   </div>
 
   <div class="result error" id="time-up" {% if not time_up %}hidden{% endif %}>
@@ -89,6 +97,19 @@ PAGE = """
   {% endif %}
 
   <form method="post" action="{{ url_for('flip') }}">
+    {% if not started %}
+      <label for="time_limit">Time limit (minutes)</label>
+      <input id="time_limit" name="time_limit" type="number" min="{{ min_minutes }}" max="{{ max_minutes }}"
+             step="1" value="{{ time_limit_input }}" required>
+
+      <label for="heads_pct_input">Heads probability (%)</label>
+      <input id="heads_pct_input" name="heads_pct" type="number" min="{{ min_pct }}" max="{{ max_pct }}"
+             step="1" value="{{ heads_pct_input }}" required>
+    {% else %}
+      <p class="settings-locked">Time limit: {{ time_limit_minutes }} min &middot;
+        Heads odds: {{ heads_pct }}% / Tails {{ tails_pct }}%</p>
+    {% endif %}
+
     <label for="bet">Bet amount ($)</label>
     <input id="bet" name="bet" type="number" step="0.01" min="0.01" max="{{ balance }}"
            value="{{ last_bet }}" required {% if locked %}disabled{% endif %}>
@@ -140,26 +161,33 @@ def init_state():
     session.setdefault("tails", 0)
     session.setdefault("last_bet", "1.00")
     session.setdefault("last_side", "heads")
+    session.setdefault("time_limit_input", str(DEFAULT_TIME_LIMIT_MINUTES))
+    session.setdefault("heads_pct_input", str(DEFAULT_HEADS_PCT))
 
 
 def seconds_left():
     """Seconds remaining in this game. The clock starts on the first flip."""
+    limit = session.get("time_limit_minutes", DEFAULT_TIME_LIMIT_MINUTES) * 60
     started = session.get("started_at")
     if started is None:
-        return TIME_LIMIT_SECONDS
-    return max(0, TIME_LIMIT_SECONDS - int(time.time() - started))
+        return limit
+    return max(0, limit - int(time.time() - started))
 
 
 @app.route("/")
 def index():
-    init_state()
-    # Every flip redirects here and marks the session first. Any other load of the
-    # page (opening it, refreshing it) restarts the clock; balance and stats are kept.
+    # Every flip marks the session before its redirect here. Any other load of the
+    # page (opening it, refreshing it) starts a brand new game: balance, stats, the
+    # clock and the settings all reset.
     if not session.pop("after_flip", False):
-        session.pop("started_at", None)
+        session.clear()
+    init_state()
+
     balance = Decimal(session["balance"])
     flips = session["flips"]
-    heads_pct = f"{session['heads'] / flips * 100:.1f}%" if flips else "—"
+    heads_pct_stat = f"{session['heads'] / flips * 100:.1f}%" if flips else "—"
+    started = "started_at" in session
+    heads_pct = session.get("heads_pct", DEFAULT_HEADS_PCT)
     left = seconds_left()
     time_up = left == 0
     return render_template_string(
@@ -168,7 +196,7 @@ def index():
         flips=flips,
         heads=session["heads"],
         tails=session["tails"],
-        heads_pct=heads_pct,
+        heads_pct_stat=heads_pct_stat,
         last_bet=session["last_bet"],
         last_side=session["last_side"],
         broke=balance <= 0,
@@ -176,7 +204,17 @@ def index():
         locked=balance <= 0 or time_up,
         seconds_left=left,
         time_left=f"{left // 60}:{left % 60:02d}",
-        running="started_at" in session and not time_up,
+        running=started and not time_up,
+        started=started,
+        heads_pct=heads_pct,
+        tails_pct=100 - heads_pct,
+        time_limit_minutes=session.get("time_limit_minutes", DEFAULT_TIME_LIMIT_MINUTES),
+        time_limit_input=session["time_limit_input"],
+        heads_pct_input=session["heads_pct_input"],
+        min_minutes=MIN_TIME_LIMIT_MINUTES,
+        max_minutes=MAX_TIME_LIMIT_MINUTES,
+        min_pct=MIN_HEADS_PCT,
+        max_pct=MAX_HEADS_PCT,
         message=session.pop("message", None),
         message_class=session.pop("message_class", ""),
     )
@@ -209,12 +247,47 @@ def read_bet(balance):
     return side, bet.quantize(CENT), None
 
 
+def read_settings():
+    """Parse and validate the one-time game settings, sent with the first flip.
+    Returns (minutes, heads_pct, error_message). Attempted values are kept in the
+    session either way, so a rejected first flip doesn't clear what was typed."""
+    raw_minutes = request.form.get("time_limit", "").strip()
+    raw_pct = request.form.get("heads_pct", "").strip()
+    session["time_limit_input"] = raw_minutes or session["time_limit_input"]
+    session["heads_pct_input"] = raw_pct or session["heads_pct_input"]
+
+    if not raw_minutes:
+        return None, None, "Enter a time limit."
+    if not WHOLE_NUMBER_PATTERN.fullmatch(raw_minutes):
+        return None, None, "Enter the time limit as a whole number of minutes."
+    minutes = int(raw_minutes)
+    if not (MIN_TIME_LIMIT_MINUTES <= minutes <= MAX_TIME_LIMIT_MINUTES):
+        return None, None, f"Time limit must be between {MIN_TIME_LIMIT_MINUTES} and {MAX_TIME_LIMIT_MINUTES} minutes."
+
+    if not raw_pct:
+        return None, None, "Enter the heads probability."
+    if not WHOLE_NUMBER_PATTERN.fullmatch(raw_pct):
+        return None, None, "Enter the heads probability as a whole number percentage."
+    pct = int(raw_pct)
+    if not (MIN_HEADS_PCT <= pct <= MAX_HEADS_PCT):
+        return None, None, f"Heads probability must be between {MIN_HEADS_PCT} and {MAX_HEADS_PCT}."
+
+    return minutes, pct, None
+
+
 @app.route("/flip", methods=["POST"])
 def flip():
     init_state()
-    session["after_flip"] = True  # so the redirect back to the page keeps the clock
+    session["after_flip"] = True  # so the redirect back to the page keeps the game
     if seconds_left() == 0:
         return redirect(url_for("index"))  # the page shows the time's-up summary
+
+    is_first_flip = "started_at" not in session
+    if is_first_flip:
+        minutes, pct, settings_error = read_settings()
+        if settings_error:
+            session["message"], session["message_class"] = settings_error, "error"
+            return redirect(url_for("index"))
 
     balance = Decimal(session["balance"])
     side, bet, error = read_bet(balance)
@@ -222,8 +295,12 @@ def flip():
         session["message"], session["message_class"] = error, "error"
         return redirect(url_for("index"))
 
-    session.setdefault("started_at", time.time())
-    result = "heads" if random.random() < HEADS_PROBABILITY else "tails"
+    if is_first_flip:
+        session["time_limit_minutes"] = minutes
+        session["heads_pct"] = pct
+        session["started_at"] = time.time()
+
+    result = "heads" if random.random() * 100 < session["heads_pct"] else "tails"
     session["flips"] += 1
     session[result] += 1
 
