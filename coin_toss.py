@@ -4,7 +4,7 @@ Biased Coin Toss Simulator
 A small Flask web app: 60% heads / 40% tails.
 Start with $25, bet any amount up to your balance, pick a side,
 and track total flips, heads, tails, and your running balance.
-Each game lasts 5 minutes, starting from the first flip.
+You get 5 minutes, starting from the first flip; refreshing the page restarts the clock.
 
 Run:
     pip install flask
@@ -82,10 +82,10 @@ PAGE = """
     <div class="stat"><div class="label">Heads %</div><div class="value">{{ heads_pct }}</div></div>
   </div>
 
-  {% if time_up %}
-    <div class="result error">Time's up! You finished with ${{ balance }} after {{ flips }} flips.</div>
-  {% elif message %}
-    <div class="result {{ message_class }}">{{ message }}</div>
+  <div class="result error" id="time-up" {% if not time_up %}hidden{% endif %}>
+    Time's up! You finished with ${{ balance }} after {{ flips }} flips.</div>
+  {% if message and not time_up %}
+    <div class="result {{ message_class }}" id="message">{{ message }}</div>
   {% endif %}
 
   <form method="post" action="{{ url_for('flip') }}">
@@ -110,14 +110,20 @@ PAGE = """
 </div>
 <script>
   // Count down in the browser; the server enforces the limit either way.
+  // At zero, lock the page here rather than reloading, since a reload restarts the clock.
   const timer = document.getElementById("timer");
   if (timer.dataset.running === "yes") {
     const end = Date.now() + Number(timer.dataset.left) * 1000;
     const tick = () => {
       const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
       timer.textContent = Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0");
-      if (left === 0) location.reload();
-      else setTimeout(tick, 250);
+      if (left > 0) return setTimeout(tick, 250);
+      document.getElementById("time-up").hidden = false;
+      document.getElementById("message")?.remove();
+      document.getElementById("bet").disabled = true;
+      const flip = document.querySelector(".flip");
+      flip.disabled = true;
+      flip.textContent = "Time's up";
     };
     tick();
   }
@@ -147,6 +153,10 @@ def seconds_left():
 @app.route("/")
 def index():
     init_state()
+    # Every flip redirects here and marks the session first. Any other load of the
+    # page (opening it, refreshing it) restarts the clock; balance and stats are kept.
+    if not session.pop("after_flip", False):
+        session.pop("started_at", None)
     balance = Decimal(session["balance"])
     flips = session["flips"]
     heads_pct = f"{session['heads'] / flips * 100:.1f}%" if flips else "—"
@@ -202,6 +212,7 @@ def read_bet(balance):
 @app.route("/flip", methods=["POST"])
 def flip():
     init_state()
+    session["after_flip"] = True  # so the redirect back to the page keeps the clock
     if seconds_left() == 0:
         return redirect(url_for("index"))  # the page shows the time's-up summary
 

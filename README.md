@@ -16,6 +16,8 @@ heads 60% of the time and tails 40%, every bet pays even money, and each game la
   start it) and counts down on the page. When it reaches 0:00, betting is disabled and
   the page shows your final balance and number of flips. The server enforces the limit,
   so flips sent after time is up are ignored even if the page is out of date.
+- **Refreshing restarts the clock.** Reloading or reopening the page puts the clock back
+  to 5:00, waiting for the next flip. Your balance and stats are kept.
 - **Input checks.** The browser blocks bad input first (bet must be $0.01 up to your
   balance, in whole cents, and a side must be picked). The server checks again and
   rejects, with a message, anything that isn't a plain number (e.g. `abc`, `NaN`,
@@ -30,8 +32,11 @@ heads 60% of the time and tails 40%, every bet pays even money, and each game la
 - Routes: `GET /` shows the game, `POST /flip` places a bet, `POST /reset` starts over.
 - Game state (balance, counts, last bet and side, and when the clock started) is stored
   in the browser session cookie, so each browser has its own game.
-- The countdown on the page is a small script that reloads the page when it hits zero;
-  the real check happens on the server when a flip is posted.
+- Every flip redirects back to `GET /` after marking the session (`after_flip`). Any
+  `GET /` without that mark is a fresh load or refresh, and clears the clock's start time.
+- The countdown on the page is a small script that locks the page itself at zero
+  (reloading would restart the clock); the real check happens on the server when a flip
+  is posted.
 - The session secret key is generated at startup, so restarting the server resets
   everyone's progress.
 - Intended for local experimentation, not production use (it runs Flask's development
@@ -57,7 +62,8 @@ python -m unittest discover -s tests
 ```
 
 They cover invalid bets and sides, winning and losing flips, going broke, the time
-limit (when the clock starts, the countdown, flips at and after the limit, reset), and
+limit (when the clock starts, the countdown, flips at and after the limit, refresh,
+reset), and
 the page's validation attributes.
 
 ## Configuration

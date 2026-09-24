@@ -19,6 +19,9 @@ See docs/WORKITEMS.md for active backlog and work items (not created yet).
 
 ## Conventions
 - The time limit and all input checks are enforced on the server; browser checks are a convenience.
+- A page refresh restarts the clock. `/flip` sets `session["after_flip"]` so its redirect to `/`
+  keeps the clock; never make the page reload itself (e.g. at 0:00), as that would reset it.
+- In tests, a `GET /` right after a flip is the redirect; a second `GET /` is a refresh.
 - Every behaviour change comes with tests in `tests/test_coin_toss.py` and matching README updates.
 - In tests, fake the clock by patching `coin_toss.time` (not `time.time`, which breaks Flask's
   session cookie signing) and force flip outcomes by patching `coin_toss.random.random`.

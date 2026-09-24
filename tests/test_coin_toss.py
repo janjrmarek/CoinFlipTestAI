@@ -208,12 +208,53 @@ class TimeLimitTests(CoinTossTestCase):
         self.assertEqual(self.state()["started_at"], self.START)
 
     def test_countdown_shows_time_remaining(self):
-        self.flip_at(self.START)
         for elapsed, shown in [(0, "5:00"), (61, "3:59"), (299, "0:01")]:
             with self.subTest(elapsed=elapsed):
-                page = self.page_at(self.START + elapsed)
+                self.setUp()
+                self.flip_at(self.START)
+                page = self.page_at(self.START + elapsed)  # the page shown after the flip
                 self.assertIn(f'data-left="{300 - elapsed}"', page)
                 self.assertIn(f">{shown}<", page)
+                self.assertIn('id="time-up" hidden', page)
+
+    def test_refresh_restarts_clock(self):
+        self.flip_at(self.START)
+        self.assertIn(">4:50<", self.page_at(self.START + 10))  # redirect after the flip
+        page = self.page_at(self.START + 20)                    # user refreshes
+        self.assertIn(">5:00<", page)
+        self.assertIn("Starts on first flip", page)
+        self.assertNotIn("started_at", self.state())
+
+    def test_refresh_keeps_balance_and_stats(self):
+        self.flip_at(self.START)
+        self.page_at(self.START)
+        self.page_at(self.START + 20)
+        state = self.state()
+        self.assertEqual((Decimal(state["balance"]), state["flips"]), (Decimal("26.00"), 1))
+
+    def test_next_flip_after_refresh_starts_new_clock(self):
+        self.flip_at(self.START)
+        self.page_at(self.START)
+        self.page_at(self.START + 200)  # refresh
+        self.flip_at(self.START + 250)
+        self.assertEqual(self.state()["started_at"], self.START + 250)
+        self.assertIn(">4:00<", self.page_at(self.START + 310))
+
+    def test_refresh_after_time_up_gives_fresh_clock(self):
+        self.flip_at(self.START)
+        self.flip_at(self.START + 300)  # too late
+        self.assertIn('data-running="no"', self.page_at(self.START + 300))
+        self.assertIn(">5:00<", self.page_at(self.START + 301))  # refresh
+        self.flip_at(self.START + 302)
+        self.assertEqual(self.state()["flips"], 2)
+
+    def test_rejected_bet_does_not_restart_clock(self):
+        self.flip_at(self.START)
+        self.page_at(self.START)
+        self.flip_at(self.START + 50, bet="abc")
+        page = self.page_at(self.START + 50)
+        self.assertIn(">4:10<", page)
+        self.assertIn("Enter the bet as a number", page)
 
     def test_can_flip_just_before_limit(self):
         self.flip_at(self.START)
@@ -240,6 +281,7 @@ class TimeLimitTests(CoinTossTestCase):
         self.flip_at(self.START + 10, outcome=TAILS)
         page = self.page_at(self.START + 300)
         self.assertIn("Time's up! You finished with $25.00 after 2 flips.", page)
+        self.assertNotIn('id="time-up" hidden', page)
         self.assertIn(">0:00<", page)
         self.assertIn('data-running="no"', page)
         self.assertEqual(page.count("disabled>"), 2)  # bet input and Flip!
@@ -248,8 +290,8 @@ class TimeLimitTests(CoinTossTestCase):
     def test_reset_restarts_clock(self):
         self.flip_at(self.START)
         self.client.post("/reset")
-        self.assertIn(">5:00<", self.page_at(self.START + 1000))
-        self.flip_at(self.START + 1000)
+        self.assertIn(">5:00<", self.page_at(self.START + 100))
+        self.flip_at(self.START + 100)
         self.assertEqual(self.state()["flips"], 1)
 
     def test_limit_follows_setting(self):
