@@ -3,7 +3,7 @@
 import os
 import sys
 import unittest
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -12,33 +12,40 @@ import coin_toss  # noqa: E402
 HEADS = 0.0  # random.random() values that force each outcome at the default 60% odds
 TAILS = 0.99
 
-INVALID_BETS = [
-    ("", "Enter a bet amount."),
-    ("   ", "Enter a bet amount."),
-    ("abc", "Enter the bet as a number, like 1.50."),
-    ("NaN", "Enter the bet as a number, like 1.50."),
-    ("sNaN", "Enter the bet as a number, like 1.50."),
-    ("Infinity", "Enter the bet as a number, like 1.50."),
-    ("-Infinity", "Enter the bet as a number, like 1.50."),
-    ("1e3", "Enter the bet as a number, like 1.50."),
-    ("1e30", "Enter the bet as a number, like 1.50."),
-    ("1,000", "Enter the bet as a number, like 1.50."),
-    ("1_0", "Enter the bet as a number, like 1.50."),
-    ("$5", "Enter the bet as a number, like 1.50."),
-    ("5 5", "Enter the bet as a number, like 1.50."),
-    ("١٢", "Enter the bet as a number, like 1.50."),  # Arabic-Indic digits
-    (".", "Enter the bet as a number, like 1.50."),
-    ("-", "Enter the bet as a number, like 1.50."),
-    ("0", "Enter a bet greater than $0."),
-    ("0.00", "Enter a bet greater than $0."),
-    ("-0", "Enter a bet greater than $0."),
-    ("-5", "Enter a bet greater than $0."),
-    ("0.004", "Bets must be in whole cents."),  # used to round to $0.00
-    ("1.999", "Bets must be in whole cents."),
-    ("0.001", "Bets must be in whole cents."),
-    ("25.01", "You only have $25.00 to bet."),
-    ("100", "You only have $25.00 to bet."),
-    ("9" * 100, "You only have $25.00 to bet."),
+STARTING_BALANCE = Decimal("100000.00")
+CENT = Decimal("0.01")
+
+
+def stake_for(balance, pct):
+    """The dollar amount coin_toss.read_bet() computes for a given balance and pct."""
+    return (balance * Decimal(pct) / 100).quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+INVALID_BET_PCTS = [
+    ("", "Enter a bet percentage."),
+    ("   ", "Enter a bet percentage."),
+    ("abc", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("NaN", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("sNaN", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("Infinity", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("-Infinity", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("1e3", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("1e30", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("1,000", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("1_0", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("$5", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("5 5", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("١٢", "Enter the bet as a percentage, like 10 or 2.5."),  # Arabic-Indic digits
+    (".", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("-", "Enter the bet as a percentage, like 10 or 2.5."),
+    ("0", "Enter a percentage greater than 0%."),
+    ("0.00", "Enter a percentage greater than 0%."),
+    ("-0", "Enter a percentage greater than 0%."),
+    ("-5", "Enter a percentage greater than 0%."),
+    ("100.01", "You can bet at most 100% of your balance."),
+    ("101", "You can bet at most 100% of your balance."),
+    ("9" * 100, "You can bet at most 100% of your balance."),
+    ("0.000001", "That percentage is too small to bet anything."),
 ]
 
 INVALID_SIDES = [None, "", "edge", "HEADS", "Tails", "heads "]
@@ -56,13 +63,13 @@ INVALID_TIME_LIMITS = [
 ]
 
 INVALID_HEADS_PCTS = [
-    ("", "Enter the heads probability."),
-    ("abc", "Enter the heads probability as a whole number percentage."),
-    ("50.5", "Enter the heads probability as a whole number percentage."),
-    ("-1", "Enter the heads probability as a whole number percentage."),
-    ("0", "Heads probability must be between 1 and 99."),
-    ("100", "Heads probability must be between 1 and 99."),
-    ("101", "Heads probability must be between 1 and 99."),
+    ("", "Enter the TTTQ Breakout Win probability."),
+    ("abc", "Enter the TTTQ Breakout Win probability as a whole number percentage."),
+    ("50.5", "Enter the TTTQ Breakout Win probability as a whole number percentage."),
+    ("-1", "Enter the TTTQ Breakout Win probability as a whole number percentage."),
+    ("0", "TTTQ Breakout Win probability must be between 1 and 99."),
+    ("100", "TTTQ Breakout Win probability must be between 1 and 99."),
+    ("101", "TTTQ Breakout Win probability must be between 1 and 99."),
 ]
 
 
@@ -72,15 +79,15 @@ class CoinTossTestCase(unittest.TestCase):
         self.client = coin_toss.app.test_client()
         self.client.get("/")  # initialise the session
 
-    def post(self, route, bet=None, side=None, time_limit=None, heads_pct=None):
+    def post(self, route, bet_pct=None, side=None, time_limit=None, heads_pct=None):
         # time_limit/heads_pct default to valid values so tests that aren't about
         # settings don't need to supply them (they're only read on the first flip).
         data = {
             "time_limit": str(coin_toss.DEFAULT_TIME_LIMIT_MINUTES) if time_limit is None else time_limit,
             "heads_pct": str(coin_toss.DEFAULT_HEADS_PCT) if heads_pct is None else heads_pct,
         }
-        if bet is not None:
-            data["bet"] = bet
+        if bet_pct is not None:
+            data["bet_pct"] = bet_pct
         if side is not None:
             data["side"] = side
         return self.client.post(route, data=data)
@@ -98,7 +105,7 @@ class CoinTossTestCase(unittest.TestCase):
         state = self.state()
         self.assertEqual(state["message"], message)
         self.assertEqual(state["message_class"], "error")
-        self.assertEqual(state["balance"], "25.00")
+        self.assertEqual(state["balance"], str(STARTING_BALANCE))
         self.assertEqual(state["flips"], 0)
         self.assertNotIn("started_at", state)  # a rejected first flip doesn't start the game
         self.assertNotIn("time_limit_minutes", state)
@@ -106,35 +113,37 @@ class CoinTossTestCase(unittest.TestCase):
 
 
 class InvalidInputTests(CoinTossTestCase):
-    def test_invalid_bets_are_rejected(self):
-        for bet, message in INVALID_BETS:
-            with self.subTest(bet=bet):
+    def test_invalid_bet_pcts_are_rejected(self):
+        for pct, message in INVALID_BET_PCTS:
+            with self.subTest(pct=pct):
                 self.setUp()
-                self.assert_rejected(self.post("/flip", bet, "heads"), message)
+                self.assert_rejected(self.post("/flip", pct, "heads"), message)
 
-    def test_missing_bet_field(self):
-        self.assert_rejected(self.post("/flip", side="heads"), "Enter a bet amount.")
+    def test_missing_bet_pct_field(self):
+        self.assert_rejected(self.post("/flip", side="heads"), "Enter a bet percentage.")
 
     def test_invalid_sides_are_rejected(self):
         for side in INVALID_SIDES:
             with self.subTest(side=side):
                 self.setUp()
-                self.assert_rejected(self.post("/flip", "1.00", side), "Pick heads or tails.")
+                self.assert_rejected(
+                    self.post("/flip", "1", side), "Pick TTTQ Breakout Win or TTTQ Breakout Fail."
+                )
 
     def test_rejected_input_never_causes_server_error(self):
         weird = ["\x00", "1" * 10000, "0x10", "1..2", "--1", "+1", "1.2.3", "🪙"]
-        for bet in weird:
-            with self.subTest(bet=bet[:20]):
+        for pct in weird:
+            with self.subTest(pct=pct[:20]):
                 self.setUp()
-                response = self.post("/flip", bet, "heads")
+                response = self.post("/flip", pct, "heads")
                 self.assertEqual(response.status_code, 302)
                 self.assertEqual(self.state()["flips"], 0)
 
     def test_broke_player_cannot_bet(self):
         self.set_balance("0")
-        self.post("/flip", "0.01", "heads")
+        self.post("/flip", "50", "heads")  # any valid pct of $0 rounds to nothing
         state = self.state()
-        self.assertEqual(state["message"], "You only have $0.00 to bet.")
+        self.assertEqual(state["message"], "That percentage is too small to bet anything.")
         self.assertEqual(state["flips"], 0)
 
     def test_removed_simulate_route_is_gone(self):
@@ -150,44 +159,59 @@ class InvalidInputTests(CoinTossTestCase):
 
 
 class ValidInputTests(CoinTossTestCase):
-    def flip(self, bet, side, outcome):
+    def flip(self, pct, side, outcome):
         with mock.patch("coin_toss.random.random", return_value=outcome):
-            return self.post("/flip", bet, side)
+            return self.post("/flip", pct, side)
 
-    def test_winning_flip_adds_bet(self):
+    def test_winning_flip_adds_the_staked_percentage(self):
         self.flip("5", "heads", HEADS)
         state = self.state()
-        self.assertEqual(Decimal(state["balance"]), Decimal("30.00"))
+        self.assertEqual(Decimal(state["balance"]), STARTING_BALANCE + stake_for(STARTING_BALANCE, "5"))
         self.assertEqual((state["flips"], state["heads"], state["tails"]), (1, 1, 0))
         self.assertEqual(state["message_class"], "win")
 
-    def test_losing_flip_subtracts_bet(self):
+    def test_losing_flip_subtracts_the_staked_percentage(self):
         self.flip("5", "heads", TAILS)
         state = self.state()
-        self.assertEqual(Decimal(state["balance"]), Decimal("20.00"))
+        self.assertEqual(Decimal(state["balance"]), STARTING_BALANCE - stake_for(STARTING_BALANCE, "5"))
         self.assertEqual((state["flips"], state["heads"], state["tails"]), (1, 0, 1))
         self.assertEqual(state["message_class"], "lose")
 
-    def test_accepted_bet_formats(self):
-        for bet, expected in [("1", "26.00"), ("2.5", "27.50"), (".5", "25.50"),
-                              ("1.50", "26.50"), (" 3 ", "28.00"), ("007", "32.00"),
-                              ("1.500", "26.50"), ("25", "50.00"), ("0.01", "25.01")]:
-            with self.subTest(bet=bet):
+    def test_accepted_bet_pct_formats(self):
+        for pct in ["1", "2.5", ".5", "1.50", " 3 ", "007", "1.500", "100", "0.01"]:
+            with self.subTest(pct=pct):
                 self.setUp()
-                self.flip(bet, "heads", HEADS)
-                self.assertEqual(Decimal(self.state()["balance"]), Decimal(expected))
+                self.flip(pct, "heads", HEADS)
+                expected = STARTING_BALANCE + stake_for(STARTING_BALANCE, pct.strip())
+                self.assertEqual(Decimal(self.state()["balance"]), expected)
+
+    def test_message_shows_pct_and_dollar_stake(self):
+        self.flip("5", "heads", HEADS)
+        message = self.state()["message"]
+        self.assertIn("TTTQ Breakout Win", message)
+        self.assertIn("5%", message)
+        self.assertIn("$5,000.00", message)
 
     def test_betting_whole_balance_and_losing_goes_broke(self):
-        self.flip("25.00", "tails", HEADS)
+        self.flip("100", "tails", HEADS)
         state = self.state()
         self.assertEqual(Decimal(state["balance"]), 0)
-        self.assertEqual(state["last_bet"], "0")
         page = self.client.get("/").get_data(as_text=True)
         self.assertIn("Out of money", page)
 
-    def test_next_bet_is_capped_at_remaining_balance(self):
-        self.flip("20", "heads", TAILS)
-        self.assertEqual(Decimal(self.state()["last_bet"]), Decimal("5.00"))
+    def test_stake_is_a_pct_of_the_current_balance_each_time(self):
+        # Winning first grows the balance, so the second 10% bet is a bigger dollar amount.
+        with mock.patch("coin_toss.random.random", side_effect=[HEADS, HEADS]):
+            self.post("/flip", "10", "heads")
+            balance_after_first = Decimal(self.state()["balance"])
+            self.post("/flip", "10", "heads")
+        expected_second_stake = stake_for(balance_after_first, "10")
+        self.assertEqual(Decimal(self.state()["balance"]), balance_after_first + expected_second_stake)
+        self.assertGreater(expected_second_stake, stake_for(STARTING_BALANCE, "10"))
+
+    def test_bet_pct_is_remembered(self):
+        self.flip("15", "heads", TAILS)
+        self.assertEqual(self.state()["last_bet_pct"], "15")
 
     def test_side_is_remembered(self):
         self.flip("1", "tails", TAILS)
@@ -198,11 +222,11 @@ class ValidInputTests(CoinTossTestCase):
         self.client.post("/reset")
         self.client.get("/")
         state = self.state()
-        self.assertEqual((state["balance"], state["flips"]), ("25.00", 0))
+        self.assertEqual((state["balance"], state["flips"]), (str(STARTING_BALANCE), 0))
 
 
 class GameSettingsTests(CoinTossTestCase):
-    """Time limit and heads odds must be set on the first flip and then lock in."""
+    """Time limit and TTTQ Breakout Win odds must be set on the first flip and then lock in."""
 
     def test_invalid_time_limits_are_rejected(self):
         for value, message in INVALID_TIME_LIMITS:
@@ -264,12 +288,12 @@ class GameSettingsTests(CoinTossTestCase):
         self.assertNotIn('name="time_limit"', page)
         self.assertNotIn('name="heads_pct"', page)
         self.assertIn("Time limit: 10 min", page)
-        self.assertIn("Heads odds: 75% / Tails 25%", page)
+        self.assertIn("TTTQ Breakout Win odds: 75% / TTTQ Breakout Fail 25%", page)
 
     def test_odds_line_follows_configured_probability(self):
         self.post("/flip", "1", "heads", heads_pct="35")
         page = self.client.get("/").get_data(as_text=True)
-        self.assertIn("Heads 35% &middot; Tails 65%", page)
+        self.assertIn("TTTQ Breakout Win 35% &middot; TTTQ Breakout Fail 65%", page)
 
 
 class TimeLimitTests(CoinTossTestCase):
@@ -280,9 +304,9 @@ class TimeLimitTests(CoinTossTestCase):
     def clock(self, now):
         return mock.patch("coin_toss.time", mock.Mock(time=mock.Mock(return_value=now)))
 
-    def flip_at(self, now, bet="1", side="heads", outcome=HEADS, time_limit=None, heads_pct=None):
+    def flip_at(self, now, bet_pct="1", side="heads", outcome=HEADS, time_limit=None, heads_pct=None):
         with self.clock(now), mock.patch("coin_toss.random.random", return_value=outcome):
-            return self.post("/flip", bet, side, time_limit=time_limit, heads_pct=heads_pct)
+            return self.post("/flip", bet_pct, side, time_limit=time_limit, heads_pct=heads_pct)
 
     def page_at(self, now):
         with self.clock(now):
@@ -330,7 +354,7 @@ class TimeLimitTests(CoinTossTestCase):
         self.page_at(self.START)       # the flip's own redirect: state kept
         self.page_at(self.START + 20)  # a real refresh: everything resets
         state = self.state()
-        self.assertEqual(state["balance"], "25.00")
+        self.assertEqual(state["balance"], str(STARTING_BALANCE))
         self.assertEqual((state["flips"], state["heads"], state["tails"]), (0, 0, 0))
         self.assertNotIn("time_limit_minutes", state)
         self.assertNotIn("heads_pct", state)
@@ -356,10 +380,10 @@ class TimeLimitTests(CoinTossTestCase):
     def test_rejected_bet_does_not_restart_clock(self):
         self.flip_at(self.START)
         self.page_at(self.START)
-        self.flip_at(self.START + 50, bet="abc")
+        self.flip_at(self.START + 50, bet_pct="abc")
         page = self.page_at(self.START + 50)
         self.assertIn(">4:10<", page)
-        self.assertIn("Enter the bet as a number", page)
+        self.assertIn("Enter the bet as a percentage", page)
 
     def test_can_flip_just_before_limit(self):
         self.flip_at(self.START)
@@ -367,25 +391,26 @@ class TimeLimitTests(CoinTossTestCase):
         self.assertEqual(self.state()["flips"], 2)
 
     def test_cannot_flip_after_limit(self):
-        self.flip_at(self.START)
+        self.flip_at(self.START)  # 1% win: 100,000.00 -> 101,000.00
+        expected_balance = STARTING_BALANCE + stake_for(STARTING_BALANCE, "1")
         for elapsed in (300, 301, 10_000):
             with self.subTest(elapsed=elapsed):
                 self.flip_at(self.START + elapsed)
                 state = self.state()
                 self.assertEqual(state["flips"], 1)
-                self.assertEqual(Decimal(state["balance"]), Decimal("26.00"))
+                self.assertEqual(Decimal(state["balance"]), expected_balance)
 
     def test_time_up_is_checked_before_bet(self):
         self.flip_at(self.START)
         self.client.get("/")  # clear the flip's message
-        self.flip_at(self.START + 300, bet="abc")
+        self.flip_at(self.START + 300, bet_pct="abc")
         self.assertNotIn("message", self.state())
 
     def test_page_after_time_up(self):
-        self.flip_at(self.START)
-        self.flip_at(self.START + 10, outcome=TAILS)
+        self.flip_at(self.START)                          # 1% win: 100,000 -> 101,000
+        self.flip_at(self.START + 10, outcome=TAILS)       # 1% loss of 101,000 -> 99,990
         page = self.page_at(self.START + 300)
-        self.assertIn("Time's up! You finished with $25.00 after 2 flips.", page)
+        self.assertIn("Time's up! You finished with $99,990.00 after 2 flips.", page)
         self.assertNotIn('id="time-up" hidden', page)
         self.assertIn(">0:00<", page)
         self.assertIn('data-running="no"', page)
@@ -413,15 +438,20 @@ class PageTests(CoinTossTestCase):
 
     def test_bet_input_has_browser_validation(self):
         page = self.page()
-        self.assertIn('type="number" step="0.01" min="0.01" max="25.00"', page)
+        self.assertIn('type="number" step="0.01" min="0.01" max="100"', page)
         self.assertIn("required", page)
 
     def test_side_is_required(self):
         self.assertIn('value="heads" required', self.page())
 
+    def test_side_labels_use_tttq_terms(self):
+        page = self.page()
+        self.assertIn("TTTQ Breakout Win</label>", page)
+        self.assertIn("TTTQ Breakout Fail</label>", page)
+
     def test_controls_disabled_when_broke(self):
         with mock.patch("coin_toss.random.random", return_value=TAILS):
-            self.post("/flip", "25.00", "heads")  # bet it all and lose
+            self.post("/flip", "100", "heads")  # bet it all and lose
         page = self.page()
         self.assertIn("Out of money", page)
         self.assertEqual(page.count("disabled>"), 2)  # bet input and Flip!
@@ -430,7 +460,15 @@ class PageTests(CoinTossTestCase):
         self.assertNotIn("Simulate", self.page())
 
     def test_default_odds_shown_before_first_flip(self):
-        self.assertIn("Heads 60% &middot; Tails 40%", self.page())
+        self.assertIn("TTTQ Breakout Win 60% &middot; TTTQ Breakout Fail 40%", self.page())
+
+    def test_starting_balance_shown_with_thousands_separator(self):
+        page = self.page()
+        self.assertIn("$100,000.00", page)
+        self.assertIn("Reset to $100,000.00", page)
+
+    def test_bet_preview_data_carries_raw_balance(self):
+        self.assertIn('data-balance="100000.00"', self.page())
 
     def test_heads_percentage(self):
         with mock.patch("coin_toss.random.random", side_effect=[HEADS, HEADS, TAILS]):
@@ -441,8 +479,8 @@ class PageTests(CoinTossTestCase):
 
     def test_message_shown_once(self):
         self.post("/flip", "abc", "heads")
-        self.assertIn("Enter the bet as a number", self.page())
-        self.assertNotIn("Enter the bet as a number", self.page())
+        self.assertIn("Enter the bet as a percentage", self.page())
+        self.assertNotIn("Enter the bet as a percentage", self.page())
 
 
 if __name__ == "__main__":

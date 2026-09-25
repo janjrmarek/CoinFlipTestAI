@@ -1,10 +1,13 @@
 """
 Biased Coin Toss Simulator
 --------------------------
-A small Flask web app. Before your first flip, choose a time limit and the odds of
-heads; those lock in once you flip. Start with $25, bet any amount up to your
-balance, pick a side, and track total flips, heads, tails, and your running balance.
-Refreshing the page starts a brand new game.
+A small Flask web app themed as a TTTQ breakout bet. Before your first flip, choose a
+time limit and the odds of a breakout win; those lock in once you flip. Start with
+$100,000, bet a percentage of your balance, pick a side, and track total flips, wins,
+fails, and your running balance. Refreshing the page starts a brand new game.
+
+The two outcomes are stored and compared internally as "heads" (breakout win) and
+"tails" (breakout fail) — only the on-screen labels changed, via OUTCOME_LABELS below.
 
 Run:
     pip install flask
@@ -16,14 +19,14 @@ import random
 import re
 import secrets
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from flask import Flask, redirect, render_template_string, request, session, url_for
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
-STARTING_BALANCE = "25.00"
+STARTING_BALANCE = "100000.00"
 CENT = Decimal("0.01")
 BET_PATTERN = re.compile(r"-?(\d+\.?\d*|\.\d+)", re.ASCII)
 WHOLE_NUMBER_PATTERN = re.compile(r"\d+", re.ASCII)
@@ -35,6 +38,10 @@ MAX_TIME_LIMIT_MINUTES = 60
 DEFAULT_HEADS_PCT = 60
 MIN_HEADS_PCT = 1
 MAX_HEADS_PCT = 99
+
+DEFAULT_BET_PCT = "10"
+
+OUTCOME_LABELS = {"heads": "TTTQ Breakout Win", "tails": "TTTQ Breakout Fail"}
 
 PAGE = """
 <!doctype html>
@@ -71,12 +78,13 @@ PAGE = """
   .flip:disabled { background:#ddd; color:#888; cursor:not-allowed; }
   .reset { background:transparent; color:#666; text-decoration:underline; margin-top:8px; }
   .settings-locked { color:#666; font-size:.85rem; margin:10px 0 0; }
+  .bet-preview { color:#666; font-size:.8rem; margin:4px 0 0; min-height:1.1em; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>🪙 Coin Toss</h1>
-  <p class="odds">Heads {{ heads_pct }}% &middot; Tails {{ tails_pct }}% &middot; Even-money payout</p>
+  <p class="odds">TTTQ Breakout Win {{ heads_pct }}% &middot; TTTQ Breakout Fail {{ tails_pct }}% &middot; Even-money payout</p>
 
   <div class="stats">
     <div class="stat balance"><div class="label">Balance</div><div class="value">${{ balance }}</div></div>
@@ -85,9 +93,9 @@ PAGE = """
       {% if not running and not time_up %}<div class="hint">Starts on first flip</div>{% endif %}
     </div>
     <div class="stat"><div class="label">Total flips</div><div class="value">{{ flips }}</div></div>
-    <div class="stat"><div class="label">Heads</div><div class="value">{{ heads }}</div></div>
-    <div class="stat"><div class="label">Tails</div><div class="value">{{ tails }}</div></div>
-    <div class="stat"><div class="label">Heads %</div><div class="value">{{ heads_pct_stat }}</div></div>
+    <div class="stat"><div class="label">Breakout wins</div><div class="value">{{ heads }}</div></div>
+    <div class="stat"><div class="label">Breakout fails</div><div class="value">{{ tails }}</div></div>
+    <div class="stat"><div class="label">Win %</div><div class="value">{{ heads_pct_stat }}</div></div>
   </div>
 
   <div class="result error" id="time-up" {% if not time_up %}hidden{% endif %}>
@@ -102,22 +110,24 @@ PAGE = """
       <input id="time_limit" name="time_limit" type="number" min="{{ min_minutes }}" max="{{ max_minutes }}"
              step="1" value="{{ time_limit_input }}" required>
 
-      <label for="heads_pct_input">Heads probability (%)</label>
+      <label for="heads_pct_input">TTTQ Breakout Win probability (%)</label>
       <input id="heads_pct_input" name="heads_pct" type="number" min="{{ min_pct }}" max="{{ max_pct }}"
              step="1" value="{{ heads_pct_input }}" required>
     {% else %}
       <p class="settings-locked">Time limit: {{ time_limit_minutes }} min &middot;
-        Heads odds: {{ heads_pct }}% / Tails {{ tails_pct }}%</p>
+        TTTQ Breakout Win odds: {{ heads_pct }}% / TTTQ Breakout Fail {{ tails_pct }}%</p>
     {% endif %}
 
-    <label for="bet">Bet amount ($)</label>
-    <input id="bet" name="bet" type="number" step="0.01" min="0.01" max="{{ balance }}"
-           value="{{ last_bet }}" required {% if locked %}disabled{% endif %}>
+    <label for="bet_pct">Bet (% of balance)</label>
+    <input id="bet_pct" name="bet_pct" type="number" step="0.01" min="0.01" max="100"
+           value="{{ last_bet_pct }}" data-balance="{{ balance_raw }}"
+           required {% if locked %}disabled{% endif %}>
+    <p class="bet-preview" id="bet-preview"></p>
 
     <label>Your call</label>
     <div class="sides">
-      <label><input type="radio" name="side" value="heads" required {% if last_side == 'heads' %}checked{% endif %}> Heads</label>
-      <label><input type="radio" name="side" value="tails" {% if last_side == 'tails' %}checked{% endif %}> Tails</label>
+      <label><input type="radio" name="side" value="heads" required {% if last_side == 'heads' %}checked{% endif %}> TTTQ Breakout Win</label>
+      <label><input type="radio" name="side" value="tails" {% if last_side == 'tails' %}checked{% endif %}> TTTQ Breakout Fail</label>
     </div>
 
     <button class="flip" type="submit" {% if locked %}disabled{% endif %}>
@@ -126,7 +136,7 @@ PAGE = """
   </form>
 
   <form method="post" action="{{ url_for('reset') }}">
-    <button class="reset" type="submit">Reset to $25</button>
+    <button class="reset" type="submit">Reset to {{ starting_balance }}</button>
   </form>
 </div>
 <script>
@@ -141,13 +151,26 @@ PAGE = """
       if (left > 0) return setTimeout(tick, 250);
       document.getElementById("time-up").hidden = false;
       document.getElementById("message")?.remove();
-      document.getElementById("bet").disabled = true;
+      document.getElementById("bet_pct").disabled = true;
       const flip = document.querySelector(".flip");
       flip.disabled = true;
       flip.textContent = "Time's up";
     };
     tick();
   }
+
+  // Show the dollar amount a bet percentage works out to, at the current balance.
+  const betInput = document.getElementById("bet_pct");
+  const betPreview = document.getElementById("bet-preview");
+  const updateBetPreview = () => {
+    const balance = Number(betInput.dataset.balance);
+    const pct = Number(betInput.value);
+    betPreview.textContent = pct > 0 && pct <= 100 && !isNaN(balance)
+      ? "≈ $" + (balance * pct / 100).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})
+      : "";
+  };
+  betInput.addEventListener("input", updateBetPreview);
+  updateBetPreview();
 </script>
 </body>
 </html>
@@ -159,7 +182,7 @@ def init_state():
     session.setdefault("flips", 0)
     session.setdefault("heads", 0)
     session.setdefault("tails", 0)
-    session.setdefault("last_bet", "1.00")
+    session.setdefault("last_bet_pct", DEFAULT_BET_PCT)
     session.setdefault("last_side", "heads")
     session.setdefault("time_limit_input", str(DEFAULT_TIME_LIMIT_MINUTES))
     session.setdefault("heads_pct_input", str(DEFAULT_HEADS_PCT))
@@ -192,12 +215,14 @@ def index():
     time_up = left == 0
     return render_template_string(
         PAGE,
-        balance=f"{balance:.2f}",
+        balance=f"{balance:,.2f}",
+        balance_raw=f"{balance:.2f}",
+        starting_balance=f"${Decimal(STARTING_BALANCE):,.2f}",
         flips=flips,
         heads=session["heads"],
         tails=session["tails"],
         heads_pct_stat=heads_pct_stat,
-        last_bet=session["last_bet"],
+        last_bet_pct=session["last_bet_pct"],
         last_side=session["last_side"],
         broke=balance <= 0,
         time_up=time_up,
@@ -221,30 +246,33 @@ def index():
 
 
 def read_bet(balance):
-    """Parse side and bet from the form. Returns (side, bet, error_message)."""
+    """Parse side and bet percentage from the form. Returns (side, pct, stake, error_message),
+    where stake is pct% of balance, rounded to the nearest cent."""
     side = request.form.get("side", "")
     if side not in ("heads", "tails"):
-        return side, None, "Pick heads or tails."
+        return side, None, None, "Pick TTTQ Breakout Win or TTTQ Breakout Fail."
 
     # Plain decimal numbers only: rejects NaN, Infinity, exponents, commas,
     # underscores and non-ASCII digits, all of which Decimal() would accept or choke on.
-    raw = request.form.get("bet", "").strip()
+    raw = request.form.get("bet_pct", "").strip()
     if not raw:
-        return side, None, "Enter a bet amount."
+        return side, None, None, "Enter a bet percentage."
     if not BET_PATTERN.fullmatch(raw):
-        return side, None, "Enter the bet as a number, like 1.50."
+        return side, None, None, "Enter the bet as a percentage, like 10 or 2.5."
     try:
-        bet = Decimal(raw)
+        pct = Decimal(raw)
     except InvalidOperation:
-        return side, None, "Enter the bet as a number, like 1.50."
+        return side, None, None, "Enter the bet as a percentage, like 10 or 2.5."
 
-    if bet <= 0:
-        return side, None, "Enter a bet greater than $0."
-    if bet > balance:
-        return side, None, f"You only have ${balance:.2f} to bet."
-    if bet != bet.quantize(CENT):
-        return side, None, "Bets must be in whole cents."
-    return side, bet.quantize(CENT), None
+    if pct <= 0:
+        return side, None, None, "Enter a percentage greater than 0%."
+    if pct > 100:
+        return side, None, None, "You can bet at most 100% of your balance."
+
+    stake = (balance * pct / 100).quantize(CENT, rounding=ROUND_HALF_UP)
+    if stake <= 0:
+        return side, None, None, "That percentage is too small to bet anything."
+    return side, pct, stake, None
 
 
 def read_settings():
@@ -265,12 +293,12 @@ def read_settings():
         return None, None, f"Time limit must be between {MIN_TIME_LIMIT_MINUTES} and {MAX_TIME_LIMIT_MINUTES} minutes."
 
     if not raw_pct:
-        return None, None, "Enter the heads probability."
+        return None, None, "Enter the TTTQ Breakout Win probability."
     if not WHOLE_NUMBER_PATTERN.fullmatch(raw_pct):
-        return None, None, "Enter the heads probability as a whole number percentage."
+        return None, None, "Enter the TTTQ Breakout Win probability as a whole number percentage."
     pct = int(raw_pct)
     if not (MIN_HEADS_PCT <= pct <= MAX_HEADS_PCT):
-        return None, None, f"Heads probability must be between {MIN_HEADS_PCT} and {MAX_HEADS_PCT}."
+        return None, None, f"TTTQ Breakout Win probability must be between {MIN_HEADS_PCT} and {MAX_HEADS_PCT}."
 
     return minutes, pct, None
 
@@ -290,7 +318,7 @@ def flip():
             return redirect(url_for("index"))
 
     balance = Decimal(session["balance"])
-    side, bet, error = read_bet(balance)
+    side, bet_pct, stake, error = read_bet(balance)
     if error:
         session["message"], session["message_class"] = error, "error"
         return redirect(url_for("index"))
@@ -303,18 +331,19 @@ def flip():
     result = "heads" if random.random() * 100 < session["heads_pct"] else "tails"
     session["flips"] += 1
     session[result] += 1
+    label = OUTCOME_LABELS[result]
 
     if result == side:
-        balance += bet
-        session["message"] = f"{result.title()}! You won ${bet:.2f}."
+        balance += stake
+        session["message"] = f"{label}! Bet {bet_pct}% (${stake:,.2f}) — won ${stake:,.2f}."
         session["message_class"] = "win"
     else:
-        balance -= bet
-        session["message"] = f"{result.title()}. You lost ${bet:.2f}."
+        balance -= stake
+        session["message"] = f"{label}. Bet {bet_pct}% (${stake:,.2f}) — lost ${stake:,.2f}."
         session["message_class"] = "lose"
 
     session["balance"] = str(balance)
-    session["last_bet"] = str(min(bet, balance)) if balance > 0 else "0"
+    session["last_bet_pct"] = str(bet_pct)
     session["last_side"] = side
     return redirect(url_for("index"))
 

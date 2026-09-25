@@ -18,6 +18,12 @@ See docs/WORKITEMS.md for active backlog and work items (not created yet).
   use `C:\Users\John\AppData\Local\Programs\Python\Python313\python.exe` if it does.
 
 ## Conventions
+- The two outcomes are `"heads"`/`"tails"` internally (session keys, `side` form values); only
+  the display text is "TTTQ Breakout Win"/"TTTQ Breakout Fail", via `OUTCOME_LABELS`. Don't rename
+  the internal keys without a good reason — it'd touch session data, routes, and every test.
+- A bet is a percentage (`bet_pct`) of the *current* balance, computed fresh on every flip, not a
+  stored dollar amount — so the stake compounds as the balance changes and there's no "exceeds
+  balance" check to maintain (any 0–100% is always affordable). Round with `ROUND_HALF_UP`.
 - The time limit, the game settings, and all input checks are enforced on the server; browser
   checks (`required`, `min`/`max`) are a convenience only.
 - The time limit and heads odds are read from the form on the first flip only (`is_first_flip =
